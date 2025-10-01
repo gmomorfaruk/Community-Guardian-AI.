@@ -1,0 +1,22 @@
+# Python virtual environment and cache
+venv/
+__pycache__/
+*.pyc
+
+# Node.js dependencies
+node_modules/
+package-lock.json
+npm-debug.log
+yarn-error.log
+
+# React Native temporary files
+/mobile_app/CommunityGuardianApp/android/build/
+/mobile_app/CommunityGuardianApp/android/app/build/
+/mobile_app/CommunityGuardianApp/android/.gradle/
+/mobile_app/CommunityGuardianApp/android/local.properties
+/mobile_app/CommunityGuardianApp/ios/build/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store

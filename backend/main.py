@@ -1,72 +1,104 @@
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+# --- NEW: Import the jsonable_encoder ---
+from fastapi.encoders import jsonable_encoder 
 from pydantic import BaseModel
+from typing import List
 import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.ext.declarative import declarative_base
 
-# Database Setup
-DATABASE_URL = "sqlite:///./community_guardian.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Database Table Model
-class AlertRecord(Base):
-    __tablename__ = "alerts"
-    id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
-    userId = Column(String, index=True)
-    latitude = Column(Float)
-    longitude = Column(Float)
-    alertType = Column(String)
-
-Base.metadata.create_all(bind=engine)
-
-# FastAPI App
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Pydantic Model for incoming data
-class SosAlert(BaseModel):
+# --- Database Simulation ---
+class Alert(BaseModel):
+    id: int
+    timestamp: datetime.datetime
+    latitude: float
+    longitude: float
     userId: str
-    location: dict
     alertType: str
 
-# Dependency to get DB session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+fake_database: List[Alert] = []
+next_id = 1
+
+# --- WebSocket Connection Manager ---
+websocket_connections: List[WebSocket] = []
+
+async def broadcast_alert(alert: Alert):
+    """Sends a new alert to all connected dashboards."""
+    
+    # --- THIS IS THE FIX ---
+    # We use jsonable_encoder to correctly convert the alert,
+    # including the datetime object, into a format that can be sent as JSON.
+    encoded_alert = jsonable_encoder(alert)
+    
+    for connection in websocket_connections:
+        # Send the properly encoded data
+        await connection.send_json(encoded_alert)
+
+# --- Application Setup ---
+app = FastAPI(
+    title="Community Guardian AI - Backend",
+    description="API for receiving SOS alerts and broadcasting them to dashboards.",
+    version="1.0.0"
+)
+
+# --- Data Models ---
+class Location(BaseModel):
+    latitude: float
+    longitude: float
+
+class SOSPayload(BaseModel):
+    userId: str
+    location: Location
+    alertType: str
+
+# --- API Endpoints ---
 
 @app.get("/")
 def read_root():
-    return {"message": "Community Guardian Backend is running!"}
+    return {"status": "Community Guardian AI Backend is running"}
 
-@app.post("/sos")
-async def receive_sos_alert(alert: SosAlert, db: Session = Depends(get_db)):
-    print(f"--- 🚨 SOS ALERT RECEIVED for user: {alert.userId} 🚨 ---")
-    db_alert = AlertRecord(
-        userId=alert.userId,
-        latitude=alert.location.get('latitude'),
-        longitude=alert.location.get('longitude'),
-        alertType=alert.alertType
+@app.post("/sos", response_model=Alert)
+async def receive_sos(payload: SOSPayload):
+    """
+    Receives an SOS alert from a mobile device, saves it,
+    and broadcasts it to all live dashboards.
+    """
+    global next_id
+    
+    new_alert = Alert(
+        id=next_id,
+        timestamp=datetime.datetime.utcnow(),
+        latitude=payload.location.latitude,
+        longitude=payload.location.longitude,
+        userId=payload.userId,
+        alertType=payload.alertType
     )
-    db.add(db_alert)
-    db.commit()
-    db.refresh(db_alert)
-    print("--- ✅ Alert saved to database! ---")
-    return {"status": "success", "database_id": db_alert.id}
+    
+    fake_database.append(new_alert)
+    next_id += 1
+    
+    # This function will now work correctly
+    await broadcast_alert(new_alert)
+    
+    print(f"Received and broadcasted alert ID: {new_alert.id}")
+    return new_alert
 
-@app.get("/alerts")
-def get_all_alerts(db: Session = Depends(get_db)):
-    return db.query(AlertRecord).all()
+@app.get("/alerts", response_model=List[Alert])
+def get_all_alerts():
+    """Gets all historical alerts from the database."""
+    return fake_database
+
+# --- LIVE DASHBOARD ENDPOINT ---
+
+@app.websocket("/ws/alerts")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    The endpoint for live dashboards to connect to.
+    """
+    await websocket.accept()
+    websocket_connections.append(websocket)
+    print(f"New dashboard connected. Total connections: {len(websocket_connections)}")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        websocket_connections.remove(websocket)
+        print(f"Dashboard disconnected. Total connections: {len(websocket_connections)}")
