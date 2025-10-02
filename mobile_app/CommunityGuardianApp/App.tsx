@@ -9,7 +9,7 @@ import {
   Platform,
   PermissionsAndroid,
   StatusBar,
-  Linking, // <-- IMPORTANT: We are now using the built-in Linking API
+  Linking,
 } from 'react-native';
 import { accelerometer, gyroscope } from 'react-native-sensors';
 import { Subscription } from 'rxjs';
@@ -37,7 +37,8 @@ const sendAlert = async (alertType: AlertType): Promise<boolean> => {
     console.log(`Sending ${alertType} alert...`);
 
     try {
-      const response = await fetch('http://10.0.2.2:8000/sos', {
+      // IMPORTANT: Replace with your computer's actual IP address
+      const response = await fetch('http://192.168.0.107:8000/sos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -75,15 +76,17 @@ const CountdownScreen = () => {
     const [counter, setCounter] = useState(15);
     const [isSending, setIsSending] = useState(false);
 
+    // ========== THIS IS THE ONLY PART THAT HAS CHANGED ==========
     useEffect(() => {
-        if (counter > 0) {
-            const timer = setTimeout(() => setCounter(counter - 1), 1000);
-            return () => clearTimeout(timer);
-        } else if (!isSending) {
-            setIsSending(true);
-            
-            sendAlert(alertType).then((success) => {
-                if (success) {
+        // This flag prevents state updates if the component is unmounted
+        let isMounted = true;
+    
+        const performAlertActions = async () => {
+            if (!isSending) {
+                if (isMounted) setIsSending(true);
+    
+                const success = await sendAlert(alertType);
+                if (success && isMounted) {
                     console.log("Contacting emergency services and contacts...");
                     
                     const ambulanceNumber = '911'; 
@@ -91,20 +94,47 @@ const CountdownScreen = () => {
                     
                     const locationURL = `https://www.google.com/maps/search/?api=1&query=${globalCurrentLocation?.coords.latitude},${globalCurrentLocation?.coords.longitude}`;
                     const message = `EMERGENCY! An alert has been triggered for user-gm via Community Guardian. Last known location: ${locationURL}`;
-
-                    // --- NEW, MODERN WAY TO CALL AND TEXT ---
-                    // Make the phone call
-                    Linking.openURL(`tel:${ambulanceNumber}`);
-
-                    // Send one SMS to all contacts (most phones support this)
-                    const recipients = emergencyContacts.join(',');
-                    Linking.openURL(`sms:${recipients}?body=${encodeURIComponent(message)}`);
+    
+                    // Action 1: Open Dialer
+                    try {
+                        await Linking.openURL(`tel:${ambulanceNumber}`);
+                    } catch (err) {
+                        console.error("Failed to open dialer", err);
+                    }
+                    
+                    // Action 2: Go back to monitoring screen BEFORE opening SMS
+                    // This makes the app experience much smoother and prevents crashes.
+                    navigation.goBack();
+    
+                    // Action 3: Open SMS after a short delay
+                    setTimeout(() => {
+                        const recipients = emergencyContacts.join(',');
+                        Linking.openURL(`sms:${recipients}?body=${encodeURIComponent(message)}`);
+                    }, 500); // 0.5-second delay
+                } else if (isMounted) {
+                    // If sending failed, just go back
+                    navigation.goBack();
                 }
-                
-                navigation.goBack();
-            });
+            }
+        };
+    
+        if (counter > 0) {
+            const timer = setTimeout(() => {
+                if (isMounted) setCounter(counter - 1);
+            }, 1000);
+            
+            // Cleanup function for the timer
+            return () => clearTimeout(timer);
+        } else {
+            performAlertActions();
         }
+    
+        // Main cleanup function for the component
+        return () => {
+            isMounted = false;
+        };
     }, [counter, navigation, alertType, isSending]);
+    // =============================================================
 
     const handleCancel = () => {
         console.log("Alert cancelled by user.");
@@ -138,6 +168,35 @@ const MonitoringScreen = () => {
   const navigation = useNavigation<MonitoringScreenNavigationProp>();
   const [appStatus, setAppStatus] = useState<AppStatus>('initializing');
   const [locationStatus, setLocationStatus] = useState<LocationStatus>('waiting');
+
+  const requestLocationPermission = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title: 'Community Guardian Location Permission',
+            message:
+              'Community Guardian needs access to your location ' +
+              'so we can send for help in an emergency.',
+            buttonPositive: 'OK',
+            buttonNegative: 'Cancel',
+          },
+        );
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          console.log('Location permission granted');
+          return true;
+        } else {
+          console.log('Location permission denied');
+          return false;
+        }
+      } catch (err) {
+        console.warn(err);
+        return false;
+      }
+    }
+    return true;
+  };
 
   useEffect(() => {
     let accelSub: Subscription | null = null;
@@ -186,16 +245,6 @@ const MonitoringScreen = () => {
       if (locationWatcherId !== null) Geolocation.clearWatch(locationWatcherId);
     };
   }, []);
-
-  const requestLocationPermission = async (): Promise<boolean> => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      } catch (err) { return false; }
-    }
-    return true;
-  };
 
   const handleAlertTrigger = (alertType: AlertType) => {
     if (locationStatus !== 'ready') {
@@ -256,7 +305,7 @@ const MonitoringScreen = () => {
 
 // --- APP CONTAINER & NAVIGATION ---
 const Stack = createNativeStackNavigator<RootStackParamList>();
-const App = () => { // <-- THE PERIOD IS GONE!
+const App = () => {
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
@@ -280,7 +329,7 @@ const styles = StyleSheet.create({
   subStatusText: { fontSize: 16, color: '#8B949E', textAlign: 'center', lineHeight: 24 },
   monitoringHeader: { alignItems: 'center' },
   buttonContainer: { alignItems: 'center' },
-  sosButton: { width: 180, height: 180, borderRadius: 90, backgroundColor: '#DA3633', justifyContent: 'center', alignItems: 'center', borderWidth: 4, borderColor: 'rgba(218, 54, 51, 0.3)', elevation: 10, shadowColor: '#DA3633', shadowOpacity: 0.5, shadowRadius: 15 },
+  sosButton: { width: 180, height: 180, borderRadius: 90, backgroundColor: '#DA3633', justifyContent: 'center', alignItems: 'center', borderWidth: 4, borderColor: 'rgba(218, 54, 51, 0.3)', elevation: 10, shadowColor: '#DA33', shadowOpacity: 0.5, shadowRadius: 15 },
   sosButtonText: { fontSize: 50, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
   buttonLabel: { fontSize: 16, color: '#8B949E', marginTop: 15, fontWeight: '600' },
   testButton: { backgroundColor: '#21262D', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, borderWidth: 1, borderColor: '#30363D' },
