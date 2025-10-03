@@ -105,3 +105,14 @@ body {
   font-weight: bold;
   color: #ef5350;
 }
+
+.location-link {
+  color: #8ab4f8; /* A nice blue color */
+  text-decoration: none;
+  font-weight: bold;
+}
+
+.location-link:hover {
+  text-decoration: underline;
+  color: #a7c5fa;
+}

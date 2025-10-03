@@ -1,104 +1,138 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-# --- NEW: Import the jsonable_encoder ---
-from fastapi.encoders import jsonable_encoder 
-from pydantic import BaseModel
-from typing import List
 import datetime
+from typing import List, Optional
 
-# --- Database Simulation ---
-class Alert(BaseModel):
-    id: int
-    timestamp: datetime.datetime
+import databases
+import sqlalchemy
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel
+
+# --- 1. DATABASE SETUP (with userName) ---
+DATABASE_URL = "sqlite:///./database.db"
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+# Define the structure of our 'alerts' table, now with 'userName'.
+alerts = sqlalchemy.Table(
+    "alerts",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("timestamp", sqlalchemy.String, nullable=False),
+    sqlalchemy.Column("latitude", sqlalchemy.Float, nullable=False),
+    sqlalchemy.Column("longitude", sqlalchemy.Float, nullable=False),
+    # --- THIS IS THE KEY CHANGE ---
+    sqlalchemy.Column("userName", sqlalchemy.String, nullable=False),
+    sqlalchemy.Column("alertType", sqlalchemy.String, nullable=False),
+)
+
+engine = sqlalchemy.create_engine(DATABASE_URL)
+metadata.create_all(engine)
+
+
+# --- DATA MODELS (Pydantic Models) ---
+
+# This model is for data coming INTO the API
+class LocationWithTime(BaseModel):
     latitude: float
     longitude: float
-    userId: str
+    speed: Optional[float] = None
+    accuracy: Optional[float] = None
+    timestamp: int
+
+class SOSPayload(BaseModel):
+    # --- THIS IS THE KEY CHANGE ---
+    userName: str  # We now expect userName instead of userId
+    location: LocationWithTime
     alertType: str
 
-fake_database: List[Alert] = []
-next_id = 1
+# This model is for data going OUT of the API (and to the database)
+class Alert(BaseModel):
+    id: int
+    timestamp: str
+    latitude: float
+    longitude: float
+    # --- THIS IS THE KEY CHANGE ---
+    userName: str
+    alertType: str
 
-# --- WebSocket Connection Manager ---
+
+# --- WEBSOCKET MANAGER (Unchanged) ---
 websocket_connections: List[WebSocket] = []
-
 async def broadcast_alert(alert: Alert):
-    """Sends a new alert to all connected dashboards."""
-    
-    # --- THIS IS THE FIX ---
-    # We use jsonable_encoder to correctly convert the alert,
-    # including the datetime object, into a format that can be sent as JSON.
     encoded_alert = jsonable_encoder(alert)
-    
     for connection in websocket_connections:
-        # Send the properly encoded data
         await connection.send_json(encoded_alert)
 
-# --- Application Setup ---
+
+# --- APPLICATION SETUP (Unchanged) ---
 app = FastAPI(
     title="Community Guardian AI - Backend",
     description="API for receiving SOS alerts and broadcasting them to dashboards.",
-    version="1.0.0"
+    version="1.2.0-username"
 )
 
-# --- Data Models ---
-class Location(BaseModel):
-    latitude: float
-    longitude: float
+# --- FASTAPI LIFECYCLE EVENTS (Unchanged) ---
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+    print("Database connection established.")
 
-class SOSPayload(BaseModel):
-    userId: str
-    location: Location
-    alertType: str
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+    print("Database connection closed.")
 
-# --- API Endpoints ---
 
-@app.get("/")
-def read_root():
-    return {"status": "Community Guardian AI Backend is running"}
+# --- API ENDPOINTS ---
 
 @app.post("/sos", response_model=Alert)
 async def receive_sos(payload: SOSPayload):
-    """
-    Receives an SOS alert from a mobile device, saves it,
-    and broadcasts it to all live dashboards.
-    """
-    global next_id
+    utc_timestamp = datetime.datetime.fromtimestamp(
+        payload.location.timestamp / 1000, tz=datetime.timezone.utc
+    )
     
-    new_alert = Alert(
-        id=next_id,
-        timestamp=datetime.datetime.utcnow(),
+    # --- INSERT a new record into the database ---
+    query = alerts.insert().values(
+        timestamp=utc_timestamp.isoformat(),
         latitude=payload.location.latitude,
         longitude=payload.location.longitude,
-        userId=payload.userId,
+        # --- THIS IS THE KEY CHANGE ---
+        userName=payload.userName,
         alertType=payload.alertType
     )
     
-    fake_database.append(new_alert)
-    next_id += 1
+    last_record_id = await database.execute(query)
     
-    # This function will now work correctly
+    # Create an Alert object to send back and broadcast
+    new_alert = Alert(
+        id=last_record_id,
+        timestamp=utc_timestamp.isoformat(),
+        latitude=payload.location.latitude,
+        longitude=payload.location.longitude,
+        # --- THIS IS THE KEY CHANGE ---
+        userName=payload.userName,
+        alertType=payload.alertType
+    )
+    
     await broadcast_alert(new_alert)
     
-    print(f"Received and broadcasted alert ID: {new_alert.id}")
+    print(f"Saved and broadcasted alert for user: {new_alert.userName}")
     return new_alert
 
 @app.get("/alerts", response_model=List[Alert])
-def get_all_alerts():
-    """Gets all historical alerts from the database."""
-    return fake_database
+async def get_all_alerts():
+    query = alerts.select().order_by(alerts.c.id.desc())
+    return await database.fetch_all(query)
 
-# --- LIVE DASHBOARD ENDPOINT ---
 
+# --- WEBSOCKET ENDPOINT (Unchanged) ---
 @app.websocket("/ws/alerts")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    The endpoint for live dashboards to connect to.
-    """
     await websocket.accept()
     websocket_connections.append(websocket)
-    print(f"New dashboard connected. Total connections: {len(websocket_connections)}")
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         websocket_connections.remove(websocket)
-        print(f"Dashboard disconnected. Total connections: {len(websocket_connections)}")

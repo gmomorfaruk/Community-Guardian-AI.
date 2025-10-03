@@ -1,25 +1,32 @@
 import React, { useState, useEffect } from 'react';
-import './App.css'; // We'll keep the basic styling
+import './App.css';
 
-// Define the structure of an Alert, matching our backend
-// In JS, we don't have interfaces, so we just know the shape.
+// --- SERVER CONFIG (Unchanged) ---
+const SERVER_IP = '192.168.0.107'; // <-- IMPORTANT: Make sure this is your computer's IP
+const API_URL = `http://${SERVER_IP}:8000/alerts`;
+const WS_URL = `ws://${SERVER_IP}:8000/ws/alerts`;
 
 function App() {
-  // State to hold all alerts, both initial and live
   const [alerts, setAlerts] = useState([]);
   const [status, setStatus] = useState("Connecting...");
 
-  useEffect(() => {
-    // This effect runs once when the component mounts
+  const formatTimestamp = (isoString) => {
+    const date = new Date(isoString);
+    const options = {
+      year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: 'numeric', minute: 'numeric', second: 'numeric',
+      hour12: true, timeZone: 'Asia/Dhaka'
+    };
+    return date.toLocaleString('en-US', options);
+  };
 
-    // 1. Fetch the initial list of alerts that already exist
+  useEffect(() => {
     async function fetchInitialAlerts() {
       try {
-        const response = await fetch('http://127.0.0.1:8000/alerts');
+        const response = await fetch(API_URL);
         if (response.ok) {
-          const initialAlerts = await response.json();
-          // Sort by most recent first
-          setAlerts(initialAlerts.sort((a, b) => b.id - a.id));
+          const data = await response.json();
+          setAlerts(data);
         } else {
           setStatus("Error fetching initial data.");
         }
@@ -31,38 +38,17 @@ function App() {
 
     fetchInitialAlerts();
 
-    // 2. Open the "live phone line" (WebSocket) to the backend
-    const ws = new WebSocket('ws://127.0.0.1:8000/ws/alerts');
-
-    ws.onopen = () => {
-      console.log("WebSocket connection established.");
-      setStatus("Live");
-    };
-
-    // 3. THIS IS THE MAGIC: What to do when a new alert arrives
+    const ws = new WebSocket(WS_URL);
+    ws.onopen = () => setStatus("Live");
     ws.onmessage = (event) => {
-      console.log("Received new alert:", event.data);
       const newAlert = JSON.parse(event.data);
-      
-      // Add the new alert to the TOP of our list
       setAlerts(prevAlerts => [newAlert, ...prevAlerts]);
     };
+    ws.onclose = () => setStatus("Disconnected");
+    ws.onerror = () => setStatus("Connection Error");
 
-    ws.onclose = () => {
-      console.log("WebSocket connection closed.");
-      setStatus("Disconnected");
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      setStatus("Connection Error");
-    };
-
-    // Cleanup function: Close the connection when the page is closed
-    return () => {
-      ws.close();
-    };
-  }, []); // The empty array ensures this effect runs only once
+    return () => ws.close();
+  }, []);
 
   return (
     <div className="App">
@@ -75,27 +61,35 @@ function App() {
           </div>
         </div>
       </header>
-      
       <main className="alert-container">
         <div className="alert-grid header-row">
           <div>Alert ID</div>
-          <div>Timestamp</div>
-          <div>User ID</div>
-          <div>Location</div>
+          <div>Timestamp (Bangladesh Time)</div>
+          <div>User Name</div>
+          <div>Location (Click to Open Map)</div>
           <div>Alert Type</div>
         </div>
-        
         {alerts.length === 0 ? (
-          <div className="no-alerts">
-            Waiting for alerts...
-          </div>
+          <div className="no-alerts">Waiting for alerts...</div>
         ) : (
           alerts.map((alert) => (
             <div key={alert.id} className="alert-grid data-row">
               <div><span className="alert-id-badge">{alert.id}</span></div>
-              <div>{new Date(alert.timestamp).toLocaleString()}</div>
-              <div>{alert.userId}</div>
-              <div>{alert.latitude.toFixed(4)}, {alert.longitude.toFixed(4)}</div>
+              <div>{formatTimestamp(alert.timestamp)}</div>
+              <div>{alert.userName}</div>
+              
+              {/* --- THIS IS THE KEY CHANGE --- */}
+              <div>
+                <a 
+                  href={`https://www.google.com/maps/search/?api=1&query=${alert.latitude},${alert.longitude}`} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="location-link"
+                >
+                  {`${alert.latitude.toFixed(4)}, ${alert.longitude.toFixed(4)}`}
+                </a>
+              </div>
+              
               <div className="alert-type">{alert.alertType.replace('_', ' ').toUpperCase()}</div>
             </div>
           ))

@@ -1,346 +1,433 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   SafeAreaView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
-  ActivityIndicator,
-  Platform,
+  TouchableOpacity,
   PermissionsAndroid,
-  StatusBar,
-  Linking,
+  Platform,
+  Alert,
+  TextInput,
+  ActivityIndicator,
+  ScrollView,
+  Linking, // <-- NEW IMPORT
 } from 'react-native';
-import { accelerometer, gyroscope } from 'react-native-sensors';
-import { Subscription } from 'rxjs';
+
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Geolocation, { GeoPosition } from 'react-native-geolocation-service';
-import { NavigationContainer, useNavigation, useRoute } from '@react-navigation/native';
+import { NavigationContainer, RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, NativeStackNavigationProp } from '@react-navigation/native-stack';
 
+import BackgroundJob from 'react-native-background-actions';
+import haversine from 'haversine-distance';
+
 // --- TYPE DEFINITIONS ---
-type RootStackParamList = {
-  Monitoring: undefined;
-  Countdown: { alertType: AlertType };
-};
-type AppStatus = 'initializing' | 'monitoring' | 'permission_denied';
-type LocationStatus = 'waiting' | 'acquiring' | 'ready' | 'denied' | 'error';
-type AlertType = 'crash_simulation' | 'sos';
+type AlertType = 'SOS' | 'CRASH_SIMULATION' | 'GEOFENCE_BREACH';
+type RootStackParamList = { Monitoring: undefined; Countdown: { alertType: Exclude<AlertType, 'GEOFENCE_BREACH'>; freshPosition: GeoPosition }; };
 type MonitoringScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Monitoring'>;
+type CountdownScreenRouteProp = RouteProp<RootStackParamList, 'Countdown'>;
+type HomeLocation = { latitude: number; longitude: number; };
 
-// --- GLOBAL STATE & FUNCTIONS ---
-let globalCurrentLocation: GeoPosition | null = null;
-const sendAlert = async (alertType: AlertType): Promise<boolean> => {
-    if (!globalCurrentLocation) {
-      console.log("Cannot send alert: Location not available.");
-      return false;
-    }
-    console.log(`Sending ${alertType} alert...`);
+// --- SERVER CONFIG ---
+const SERVER_IP = '192.168.0.107'; // <-- IMPORTANT: Make sure this is your computer's IP
+const SERVER_URL = `http://${SERVER_IP}:8000/sos`;
 
+// --- PERMISSION FUNCTION ---
+const requestLocationPermission = async () => {
+  if (Platform.OS === 'android') {
     try {
-      // IMPORTANT: Replace with your computer's actual IP address
-      const response = await fetch('http://192.168.0.107:8000/sos', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: 'user-gm',
-          location: {
-            latitude: globalCurrentLocation.coords.latitude,
-            longitude: globalCurrentLocation.coords.longitude,
-            speed: globalCurrentLocation.coords.speed,
-            accuracy: globalCurrentLocation.coords.accuracy,
-            timestamp: globalCurrentLocation.timestamp,
-          },
-          alertType: alertType,
-        }),
-      });
-
-      if (response.ok) {
-        console.log('SUCCESS: Alert sent to backend.');
-        return true;
-      } else {
-        const errorText = await response.text();
-        console.error('ERROR: Failed to send alert. Server responded with:', response.status, errorText);
-        return false;
-      }
-    } catch (error) {
-      console.error('FATAL: Network error while trying to send alert:', error);
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        {
+          title: "Location Permission",
+          message: "This app needs access to your location.",
+          buttonPositive: "OK"
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (err) {
+      console.warn(err);
       return false;
     }
+  }
+  return true;
 };
 
-// --- COUNTDOWN SCREEN COMPONENT ---
-const CountdownScreen = () => {
-    const navigation = useNavigation<MonitoringScreenNavigationProp>();
-    const route = useRoute();
-    const { alertType } = route.params as { alertType: AlertType };
-    const [counter, setCounter] = useState(15);
-    const [isSending, setIsSending] = useState(false);
-
-    // ========== THIS IS THE ONLY PART THAT HAS CHANGED ==========
-    useEffect(() => {
-        // This flag prevents state updates if the component is unmounted
-        let isMounted = true;
-    
-        const performAlertActions = async () => {
-            if (!isSending) {
-                if (isMounted) setIsSending(true);
-    
-                const success = await sendAlert(alertType);
-                if (success && isMounted) {
-                    console.log("Contacting emergency services and contacts...");
-                    
-                    const ambulanceNumber = '911'; 
-                    const emergencyContacts = ['1234567890', '0987654321'];
-                    
-                    const locationURL = `https://www.google.com/maps/search/?api=1&query=${globalCurrentLocation?.coords.latitude},${globalCurrentLocation?.coords.longitude}`;
-                    const message = `EMERGENCY! An alert has been triggered for user-gm via Community Guardian. Last known location: ${locationURL}`;
-    
-                    // Action 1: Open Dialer
-                    try {
-                        await Linking.openURL(`tel:${ambulanceNumber}`);
-                    } catch (err) {
-                        console.error("Failed to open dialer", err);
-                    }
-                    
-                    // Action 2: Go back to monitoring screen BEFORE opening SMS
-                    // This makes the app experience much smoother and prevents crashes.
-                    navigation.goBack();
-    
-                    // Action 3: Open SMS after a short delay
-                    setTimeout(() => {
-                        const recipients = emergencyContacts.join(',');
-                        Linking.openURL(`sms:${recipients}?body=${encodeURIComponent(message)}`);
-                    }, 500); // 0.5-second delay
-                } else if (isMounted) {
-                    // If sending failed, just go back
-                    navigation.goBack();
-                }
-            }
-        };
-    
-        if (counter > 0) {
-            const timer = setTimeout(() => {
-                if (isMounted) setCounter(counter - 1);
-            }, 1000);
-            
-            // Cleanup function for the timer
-            return () => clearTimeout(timer);
-        } else {
-            performAlertActions();
-        }
-    
-        // Main cleanup function for the component
-        return () => {
-            isMounted = false;
-        };
-    }, [counter, navigation, alertType, isSending]);
-    // =============================================================
-
-    const handleCancel = () => {
-        console.log("Alert cancelled by user.");
-        navigation.goBack();
-    };
-
-    return (
-        <SafeAreaView style={styles.container}>
-            <View style={styles.content}>
-                {isSending ? (
-                    <>
-                        <ActivityIndicator size={80} color="#58A6FF" />
-                        <Text style={styles.countdownStatusText}>SENDING ALERT & NOTIFYING CONTACTS...</Text>
-                    </>
-                ) : (
-                    <>
-                        <Text style={styles.countdownStatusText}>EMERGENCY ALERT IN:</Text>
-                        <Text style={styles.countdownText}>{counter}</Text>
-                        <TouchableOpacity style={styles.cancelButton} onPress={handleCancel}>
-                            <Text style={styles.cancelButtonText}>CANCEL</Text>
-                        </TouchableOpacity>
-                    </>
-                )}
-            </View>
-        </SafeAreaView>
-    );
-};
-
-// --- MONITORING SCREEN COMPONENT ---
-const MonitoringScreen = () => {
-  const navigation = useNavigation<MonitoringScreenNavigationProp>();
-  const [appStatus, setAppStatus] = useState<AppStatus>('initializing');
-  const [locationStatus, setLocationStatus] = useState<LocationStatus>('waiting');
-
-  const requestLocationPermission = async (): Promise<boolean> => {
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-          {
-            title: 'Community Guardian Location Permission',
-            message:
-              'Community Guardian needs access to your location ' +
-              'so we can send for help in an emergency.',
-            buttonPositive: 'OK',
-            buttonNegative: 'Cancel',
-          },
-        );
-        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-          console.log('Location permission granted');
-          return true;
-        } else {
-          console.log('Location permission denied');
-          return false;
-        }
-      } catch (err) {
-        console.warn(err);
-        return false;
+// --- UNIVERSAL ALERT SENDER ---
+const sendAlert = async (alertType: AlertType, position: GeoPosition, userName: string) => {
+  const payload = {
+    userName: userName,
+    location: {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      speed: position.coords.speed,
+      accuracy: position.coords.accuracy,
+      timestamp: position.timestamp,
+    },
+    alertType: alertType,
+  };
+  try {
+    const response = await fetch(SERVER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (alertType !== 'GEOFENCE_BREACH') {
+        Alert.alert('Failed to Send Alert', `Server responded with an error: ${errorText}`);
       }
     }
-    return true;
+  } catch (error) {
+    if (alertType !== 'GEOFENCE_BREACH') {
+        Alert.alert('Network Error', 'Could not connect to the server.');
+    }
+  }
+};
+
+// --- A "Promisified" function to get location. ---
+const getCurrentPositionAsync = (): Promise<GeoPosition> => {
+    return new Promise((resolve, reject) => {
+      Geolocation.getCurrentPosition(
+        (position) => resolve(position),
+        (error) => reject(error),
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+      );
+    });
   };
+  
+// --- BACKGROUND TASK ---
+const sleep = (time: number) => new Promise<void>(resolve => setTimeout(() => resolve(), time));
+
+const backgroundTask = async (taskData: any) => {
+    const { delay } = taskData;
+    console.log('Background task started.');
+  
+    for (let i = 0; BackgroundJob.isRunning(); i++) {
+      try {
+        const userName = await AsyncStorage.getItem('userName') || 'Unknown User';
+        const homeLocationJson = await AsyncStorage.getItem('homeLocation');
+        const radiusKmJson = await AsyncStorage.getItem('safeRadiusKm');
+  
+        if (homeLocationJson && radiusKmJson) {
+          const homeLocation: HomeLocation = JSON.parse(homeLocationJson);
+          const radiusMeters = parseFloat(radiusKmJson) * 1000;
+          
+          console.log('BG Task: Checking location...');
+          const position = await getCurrentPositionAsync();
+          
+          const currentPosition = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+          const distance = haversine(homeLocation, currentPosition);
+          
+          const taskDesc = `Monitoring... Distance: ${Math.round(distance)}m / ${radiusMeters}m`;
+          console.log(`BG Task: ${taskDesc}`);
+          await BackgroundJob.updateNotification({ taskDesc });
+  
+          if (distance > radiusMeters) {
+            console.log('BG Task: Geofence breached! Sending alert.');
+            await sendAlert('GEOFENCE_BREACH', position, userName);
+            await BackgroundJob.stop();
+            console.log('BG Task: Stopped after sending alert.');
+            break; 
+          }
+        } else {
+          console.log('BG Task: Home location or radius not set. Skipping check.');
+        }
+      } catch (error) {
+        console.error("BACKGROUND_TASK_ERROR", error);
+      }
+      console.log(`BG Task: Sleeping for ${delay / 1000} seconds...`);
+      await sleep(delay);
+    }
+    console.log('Background task finished.');
+};
+  
+// --- UPDATED BACKGROUND OPTIONS ---
+const backgroundOptions = {
+    taskName: 'CommunityGuardianTrip',
+    taskTitle: 'Trip Monitoring Active',
+    taskDesc: 'Checking your location to keep you safe...',
+    taskIcon: {
+        name: 'ic_launcher',
+        type: 'mipmap',
+    },
+    color: '#ff00ff',
+    linkingURI: 'communityguardian://',
+    parameters: {
+        delay: 60000,
+    },
+    channelId: 'CommunityGuardianChannel',
+    channelName: 'Trip Monitoring',
+};
+
+// --- MAIN APP COMPONENT ---
+function App(): React.JSX.Element {
+  const [isLoading, setIsLoading] = useState(true);
+  const [userName, setUserName] = useState<string | null>(null);
+  const [inputName, setInputName] = useState('');
 
   useEffect(() => {
-    let accelSub: Subscription | null = null;
-    let gyroSub: Subscription | null = null;
-    let locationWatcherId: number | null = null;
-
-    const initialize = async () => {
-      setAppStatus('initializing');
-      const hasLocationPermission = await requestLocationPermission();
-
-      if (!hasLocationPermission) {
-        setLocationStatus('denied');
-        setAppStatus('permission_denied');
-        return;
-      }
-
-      setLocationStatus('acquiring');
-      locationWatcherId = Geolocation.watchPosition(
-        (position) => {
-          globalCurrentLocation = position; 
-          setLocationStatus('ready');
-          setAppStatus('monitoring');
-        },
-        (error) => {
-          console.error("Location Error:", error);
-          setLocationStatus('error');
-          setAppStatus('permission_denied');
-        },
-        { enableHighAccuracy: true, distanceFilter: 10, interval: 5000, fastestInterval: 2000 }
-      );
-
+    const loadUserName = async () => {
       try {
-        accelSub = accelerometer.subscribe(() => {});
-        gyroSub = gyroscope.subscribe(() => {});
-      } catch (error) {
-        console.error('Failed to subscribe to sensors:', error);
-        setAppStatus('permission_denied');
-      }
+        const storedName = await AsyncStorage.getItem('userName');
+        setUserName(storedName);
+      } catch (e) { console.error("Failed to load user name.", e); }
+      finally { setIsLoading(false); }
     };
-
-    initialize();
-
-    return () => {
-      accelSub?.unsubscribe();
-      gyroSub?.unsubscribe();
-      if (locationWatcherId !== null) Geolocation.clearWatch(locationWatcherId);
-    };
+    loadUserName();
   }, []);
 
-  const handleAlertTrigger = (alertType: AlertType) => {
-    if (locationStatus !== 'ready') {
-        console.log("Cannot trigger alert: GPS not ready.");
-        return;
-    }
-    navigation.navigate('Countdown', { alertType });
+  const handleSaveName = async () => {
+    if (inputName.trim().length > 0) {
+      try {
+        await AsyncStorage.setItem('userName', inputName.trim());
+        setUserName(inputName.trim());
+      } catch (e) { Alert.alert("Error", "Could not save your name."); }
+    } else { Alert.alert("Invalid Name", "Please enter a valid name."); }
   };
 
-  const renderStatusPill = () => {
-    let text = 'Initializing...'; let color = '#FFA000';
-    if (locationStatus === 'ready') { text = 'GPS Lock Acquired'; color = '#388E3C'; }
-    else if (locationStatus === 'acquiring') { text = 'Acquiring GPS Signal...'; color = '#FFA000'; }
-    else if (locationStatus === 'denied') { text = 'GPS Permission Denied'; color = '#D32F2F'; }
-    else if (locationStatus === 'error') { text = 'GPS Error'; color = '#D32F2F'; }
-    return <View style={[styles.statusPill, { backgroundColor: color }]}><Text style={styles.statusPillText}>{text}</Text></View>;
-  };
+  if (isLoading) { return <View style={styles.centered}><ActivityIndicator size="large" /></View>; }
 
-  const renderContent = () => {
-    if (appStatus === 'permission_denied') {
-      return (
-        <View style={styles.centeredContent}>
-          <Text style={styles.mainStatusText}>Permission Required</Text>
-          <Text style={styles.subStatusText}>Guardian requires location access. Please grant permission in settings.</Text>
-          <TouchableOpacity style={styles.settingsButton} onPress={() => Linking.openSettings()}><Text style={styles.settingsButtonText}>Open Settings</Text></TouchableOpacity>
-        </View>
-      );
-    }
-    if (appStatus === 'initializing' || locationStatus !== 'ready') {
-      return (
-        <View style={styles.centeredContent}>
-            <ActivityIndicator size={80} color="#4FC3F7" />
-            <Text style={styles.mainStatusText}>Calibrating Systems...</Text>
-            <Text style={styles.subStatusText}>Establishing secure connection and GPS lock.</Text>
-        </View>
-      );
-    }
+  if (!userName) {
     return (
-      <>
-        <View style={styles.monitoringHeader}><Text style={styles.mainStatusText}>System Active</Text><Text style={styles.subStatusText}>Monitoring for potential incidents.</Text></View>
-        <View style={styles.buttonContainer}>
-            <TouchableOpacity style={styles.sosButton} onPress={() => handleAlertTrigger('sos')}><Text style={styles.sosButtonText}>SOS</Text></TouchableOpacity>
-            <Text style={styles.buttonLabel}>Manual Alert</Text>
-        </View>
-        <TouchableOpacity style={styles.testButton} onPress={() => handleAlertTrigger('crash_simulation')}><Text style={styles.testButtonText}>Simulate Crash</Text></TouchableOpacity>
-      </>
+      <SafeAreaView style={styles.setupContainer}>
+        <Text style={styles.setupTitle}>Welcome!</Text>
+        <Text style={styles.setupSubtitle}>Please enter your name to continue.</Text>
+        <TextInput style={styles.input} placeholder="Your Name" value={inputName} onChangeText={setInputName} />
+        <TouchableOpacity style={styles.utilityButton} onPress={handleSaveName}><Text style={styles.utilityButtonText}>Save and Continue</Text></TouchableOpacity>
+      </SafeAreaView>
     );
-  };
+  }
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#0D1117" />
-      <View style={styles.header}><Text style={styles.title}>COMMUNITY GUARDIAN</Text>{renderStatusPill()}</View>
-      <View style={styles.content}>{renderContent()}</View>
-    </SafeAreaView>
-  );
-};
-
-// --- APP CONTAINER & NAVIGATION ---
-const Stack = createNativeStackNavigator<RootStackParamList>();
-const App = () => {
   return (
     <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
-        <Stack.Screen name="Monitoring" component={MonitoringScreen} />
-        <Stack.Screen name="Countdown" component={CountdownScreen} />
-      </Stack.Navigator>
+      <RootStack.Navigator>
+        <RootStack.Screen name="Monitoring">
+          {(props) => <MonitoringScreen {...props} userName={userName} />}
+        </RootStack.Screen>
+        <RootStack.Screen name="Countdown" component={CountdownScreen} options={{ title: 'Alerting...' }} />
+      </RootStack.Navigator>
     </NavigationContainer>
   );
+}
+
+// --- SCREEN COMPONENTS ---
+const MonitoringScreen = ({ navigation, userName }: { navigation: MonitoringScreenNavigationProp; userName: string }) => {
+    const [isMonitoring, setIsMonitoring] = useState(BackgroundJob.isRunning());
+    const [homeLocation, setHomeLocation] = useState<HomeLocation | null>(null);
+    const [radius, setRadius] = useState('5');
+  
+    useEffect(() => {
+      const loadSettings = async () => {
+        const homeJson = await AsyncStorage.getItem('homeLocation');
+        if (homeJson) setHomeLocation(JSON.parse(homeJson));
+        const radiusJson = await AsyncStorage.getItem('safeRadiusKm');
+        if (radiusJson) setRadius(radiusJson);
+      };
+      loadSettings();
+    }, []);
+  
+    const handleSetHome = () => {
+        requestLocationPermission().then(granted => {
+          if (granted) {
+            Geolocation.getCurrentPosition(
+              async (position) => {
+                const newHome = {
+                  latitude: position.coords.latitude,
+                  longitude: position.coords.longitude,
+                };
+                await AsyncStorage.setItem('homeLocation', JSON.stringify(newHome));
+                setHomeLocation(newHome);
+                Alert.alert("Home Set", `Your home location has been set to your current position.`);
+              },
+              (error) => { Alert.alert("Location Error", error.message); },
+              { enableHighAccuracy: true, maximumAge: 0 }
+            );
+          }
+        });
+    };
+  
+    // --- FULLY UPDATED handleStartMonitoring FUNCTION ---
+    const handleStartMonitoring = async () => {
+        if (!homeLocation) {
+            Alert.alert("Error", "Please set a home location first.");
+            return;
+        }
+    
+        const hasLocationPermission = await requestLocationPermission();
+        if (!hasLocationPermission) {
+            Alert.alert("Permission Denied", "Location permission is required to start monitoring.");
+            return;
+        }
+    
+        if (Platform.OS === 'android' && Platform.Version >= 29) {
+            const backgroundPermission = await PermissionsAndroid.request(
+                PermissionsAndroid.PERMISSIONS.ACCESS_BACKGROUND_LOCATION,
+            );
+    
+            if (backgroundPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+                Alert.alert(
+                    "Background Location Required",
+                    "This feature needs 'Allow all the time' location access to work correctly. Please tap 'Open Settings' and change the location permission for this app to 'Allow all the time'.",
+                    [
+                        { text: "Cancel", style: "cancel" },
+                        { text: "Open Settings", onPress: () => Linking.openSettings() }
+                    ]
+                );
+                return;
+            }
+        }
+    
+        if (Platform.OS === 'android' && Platform.Version >= 33) {
+            const notificationPermission = await PermissionsAndroid.request(
+                PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+            );
+            if (notificationPermission !== PermissionsAndroid.RESULTS.GRANTED) {
+                Alert.alert("Permission Denied", "The monitoring service cannot start without notification permission.");
+                return;
+            }
+        }
+    
+        try {
+            console.log('All permissions granted. Starting background job...');
+            await AsyncStorage.setItem('safeRadiusKm', radius);
+            await BackgroundJob.start(backgroundTask, backgroundOptions);
+            setIsMonitoring(true);
+            Alert.alert("Monitoring Started", "We will now monitor your location. You can close the app.");
+            console.log('Background job started successfully.');
+        } catch (e) {
+            console.error("Failed to start background job", e);
+            Alert.alert("Error", "Could not start the background monitoring service.");
+        }
+    };
+
+    const handleStopMonitoring = async () => {
+      console.log('Stopping background job...');
+      await BackgroundJob.stop();
+      setIsMonitoring(false);
+      Alert.alert("Monitoring Stopped", "Background location tracking has been stopped.");
+      console.log('Background job stopped successfully.');
+    };
+  
+    const handleManualAlert = (alertType: 'SOS' | 'CRASH_SIMULATION') => {
+      requestLocationPermission().then(granted => {
+        if (granted) {
+          Geolocation.getCurrentPosition(
+            (position) => {
+              navigation.navigate('Countdown', { alertType, freshPosition: position });
+            },
+            (error) => { Alert.alert("Location Error", error.message); },
+            { enableHighAccuracy: true, maximumAge: 0 }
+          );
+        }
+      });
+    };
+  
+    return (
+      <SafeAreaView style={styles.container}>
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Manual Alerts</Text>
+            <View style={styles.buttonContainer}>
+              <TouchableOpacity style={styles.sosButton} onPress={() => handleManualAlert('SOS')}><Text style={styles.buttonText}>SOS</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.crashButton} onPress={() => handleManualAlert('CRASH_SIMULATION')}><Text style={styles.buttonText}>Simulate Crash</Text></TouchableOpacity>
+            </View>
+          </View>
+  
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Trip Monitoring (Geofence)</Text>
+            <Text style={styles.locationText}>
+                Home: {homeLocation ? `${homeLocation.latitude.toFixed(3)}, ${homeLocation.longitude.toFixed(3)}` : 'Not Set'}
+            </Text>
+            <TouchableOpacity style={styles.utilityButton} onPress={handleSetHome}>
+                <Text style={styles.utilityButtonText}>Set Current Location as Home</Text>
+            </TouchableOpacity>
+            <View style={styles.radiusContainer}>
+                <Text>Safe Radius (km):</Text>
+                <TextInput
+                style={styles.input}
+                value={radius}
+                onChangeText={setRadius}
+                keyboardType="numeric"
+                />
+            </View>
+            {isMonitoring ? (
+                <TouchableOpacity style={[styles.monitorButton, styles.stopButton]} onPress={handleStopMonitoring}>
+                <Text style={styles.monitorButtonText}>Stop Monitoring</Text>
+                </TouchableOpacity>
+            ) : (
+                <TouchableOpacity style={[styles.monitorButton, styles.startButton]} onPress={handleStartMonitoring}>
+                <Text style={styles.monitorButtonText}>Start Monitoring</Text>
+                </TouchableOpacity>
+            )}
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+};
+  
+const CountdownScreen = ({ route }: { route: CountdownScreenRouteProp }) => {
+    const { alertType, freshPosition } = route.params;
+    const [countdown, setCountdown] = useState(15);
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
+    useEffect(() => {
+      const performSend = async () => {
+          const storedUserName = await AsyncStorage.getItem('userName');
+          if (storedUserName) {
+              await sendAlert(alertType, freshPosition, storedUserName);
+              Alert.alert('Alert Sent', 'Your alert has been successfully sent.');
+          } else {
+              Alert.alert('Critical Error', 'Could not find user name to send alert.');
+          }
+      };
+  
+      if (countdown === 0) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        performSend();
+      }
+    }, [countdown]);
+  
+    useEffect(() => {
+      timerRef.current = setInterval(() => setCountdown(prev => prev - 1), 1000);
+      return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    }, []);
+  
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.countdownText}>{countdown}</Text>
+        <Text>Sending {alertType.replace('_', ' ')} alert...</Text>
+      </View>
+    );
 };
 
-// --- STYLESHEET ---
+// --- STYLES ---
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0D1117' },
-  header: { paddingVertical: 15, paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: '#30363D', alignItems: 'center' },
-  title: { fontSize: 22, fontWeight: '700', color: '#C9D1D9', letterSpacing: 2, marginBottom: 10 },
-  statusPill: { borderRadius: 15, paddingVertical: 4, paddingHorizontal: 12 },
-  statusPillText: { color: '#FFFFFF', fontSize: 12, fontWeight: '600' },
-  content: { flex: 1, justifyContent: 'space-around', alignItems: 'center', padding: 20 },
-  centeredContent: { justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20, flex: 1 },
-  mainStatusText: { fontSize: 28, fontWeight: '600', color: '#F0F6FC', textAlign: 'center', marginBottom: 10 },
-  subStatusText: { fontSize: 16, color: '#8B949E', textAlign: 'center', lineHeight: 24 },
-  monitoringHeader: { alignItems: 'center' },
-  buttonContainer: { alignItems: 'center' },
-  sosButton: { width: 180, height: 180, borderRadius: 90, backgroundColor: '#DA3633', justifyContent: 'center', alignItems: 'center', borderWidth: 4, borderColor: 'rgba(218, 54, 51, 0.3)', elevation: 10, shadowColor: '#DA33', shadowOpacity: 0.5, shadowRadius: 15 },
-  sosButtonText: { fontSize: 50, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
-  buttonLabel: { fontSize: 16, color: '#8B949E', marginTop: 15, fontWeight: '600' },
-  testButton: { backgroundColor: '#21262D', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10, borderWidth: 1, borderColor: '#30363D' },
-  testButtonText: { color: '#58A6FF', fontSize: 16, fontWeight: 'bold' },
-  settingsButton: { marginTop: 30, backgroundColor: '#58A6FF', paddingVertical: 12, paddingHorizontal: 30, borderRadius: 10 },
-  settingsButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: 'bold' },
-  // Countdown Screen Styles
-  countdownStatusText: { fontSize: 24, color: '#8B949E', fontWeight: '600', marginBottom: 20, textAlign: 'center' },
-  countdownText: { fontSize: 120, fontWeight: 'bold', color: '#F0F6FC', marginBottom: 40 },
-  cancelButton: { width: '80%', backgroundColor: '#388E3C', paddingVertical: 20, borderRadius: 15, justifyContent: 'center', alignItems: 'center', elevation: 8 },
-  cancelButtonText: { fontSize: 28, fontWeight: 'bold', color: '#FFFFFF', letterSpacing: 2 },
+    container: { flex: 1 },
+    scrollContent: { padding: 20 },
+    centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+    section: { marginBottom: 30, padding: 15, borderWidth: 1, borderColor: '#ddd', borderRadius: 10, },
+    sectionTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 15 },
+    buttonContainer: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', width: '100%' },
+    sosButton: { backgroundColor: 'red', padding: 20, borderRadius: 100, width: 100, height: 100, justifyContent: 'center', alignItems: 'center' },
+    crashButton: { backgroundColor: 'orange', padding: 20, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+    buttonText: { color: 'white', fontWeight: 'bold', fontSize: 18, textAlign: 'center' },
+    locationText: { fontSize: 16, marginBottom: 10, color: '#555' },
+    utilityButton: { backgroundColor: '#007AFF', padding: 15, borderRadius: 8, alignItems: 'center', marginBottom: 15 },
+    utilityButtonText: { fontSize: 16, color: 'white', fontWeight: 'bold' },
+    radiusContainer: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
+    input: { height: 40, borderColor: 'gray', borderWidth: 1, borderRadius: 5, paddingHorizontal: 10, marginLeft: 10, flex: 1, },
+    monitorButton: { padding: 20, borderRadius: 10, alignItems: 'center' },
+    startButton: { backgroundColor: 'green' },
+    stopButton: { backgroundColor: 'darkred' },
+    monitorButtonText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+    countdownText: { fontSize: 80, fontWeight: 'bold' },
+    setupContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+    setupTitle: { fontSize: 32, fontWeight: 'bold', marginBottom: 10 },
+    setupSubtitle: { fontSize: 18, color: 'gray', marginBottom: 20, textAlign: 'center' },
 });
+
+const RootStack = createNativeStackNavigator<RootStackParamList>();
 
 export default App;
